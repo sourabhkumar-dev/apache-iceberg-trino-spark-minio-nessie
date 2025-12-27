@@ -1,0 +1,127 @@
+version: "3.8"
+
+services:
+  spark-iceberg:
+    build: spark/
+    image: custom-spark-iceberg
+    container_name: spark-iceberg
+    networks:
+      - iceberg_net
+    depends_on:
+      - minio
+      - nessie
+    ports:
+      - "8080:8080"   # Spark UI
+      - "7077:7077"
+    volumes:
+      - ./notebooks:/home/iceberg/notebooks
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+
+      # Spark + Iceberg + Nessie
+      SPARK_SQL_EXTENSIONS: >
+        org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions,
+        org.projectnessie.spark.extensions.NessieSparkSessionExtensions
+
+      SPARK_JARS_PACKAGES: >
+        org.apache.hadoop:hadoop-aws:3.3.2,
+        org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.9.0,
+        org.projectnessie.nessie-integrations:nessie-spark-extensions-3.5_2.12:0.106.0
+  jupyter:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: jupyter
+    networks:
+      - iceberg_net
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+    environment:
+      AWS_ACCESS_KEY_ID: admin
+      AWS_SECRET_ACCESS_KEY: password
+      AWS_REGION: us-east-1
+        
+  postgres:
+    image: postgres:15
+    container_name: nessie-postgres
+    environment:
+      POSTGRES_DB: nessie
+      POSTGRES_USER: nessie
+      POSTGRES_PASSWORD: nessie
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - iceberg_net
+
+  nessie:
+    image: ghcr.io/projectnessie/nessie:0.106.0-java
+    container_name: nessie
+    depends_on:
+      - postgres
+    ports:
+      - "19120:19120"
+    environment:
+      QUARKUS_PROFILE: prod
+      QUARKUS_DATASOURCE_DB_KIND: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://postgres:5432/nessie
+      QUARKUS_DATASOURCE_USERNAME: nessie
+      QUARKUS_DATASOURCE_PASSWORD: nessie
+      NESSIE_VERSION_STORE_TYPE: JDBC
+    networks:
+      - iceberg_net
+
+
+  minio:
+    image: minio/minio
+    container_name: minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      iceberg_net:
+        aliases:
+          - warehouse.minio
+    environment:
+      MINIO_ROOT_USER: admin
+      MINIO_ROOT_PASSWORD: password
+    volumes:
+      - minio-data:/data
+
+  mc:
+    image: minio/mc
+    container_name: mc
+    depends_on:
+      - minio
+    networks:
+      - iceberg_net
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set minio http://minio:9000 admin password; do sleep 1; done;
+      mc mb -p minio/warehouse || true;
+      tail -f /dev/null
+      "
+
+  trino:
+    image: trinodb/trino:427
+    container_name: trino
+    ports:
+      - "8082:8080"
+    networks:
+      - iceberg_net
+    depends_on:
+      - minio
+      - nessie
+    volumes:
+      - ./trino/etc:/etc/trino
+      - ./trino/data:/data/trino
+
+volumes:
+  minio-data:
+  pgdata:
+
+networks:
+  iceberg_net:
+    driver: bridge
